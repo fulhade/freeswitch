@@ -239,6 +239,8 @@ struct url_cache {
 	long connect_timeout;
 	/** How long to wait, in seconds, for download of file.  If 0, use default value of 300 seconds */
 	long download_timeout;
+	/** User Agent for http client */
+	char *user_agent;
 };
 static url_cache_t gcache;
 
@@ -407,7 +409,7 @@ static switch_status_t http_put(url_cache_t *cache, http_profile_t *profile, swi
 		switch_curl_easy_setopt(curl_handle, CURLOPT_INFILESIZE_LARGE,(curl_off_t) content_length);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 10);
-		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "freeswitch-http-cache/1.0");
+		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, cache->user_agent);
 		if (cache->connect_timeout > 0) {
 			switch_curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, cache->connect_timeout);
 		}
@@ -1143,7 +1145,7 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 		switch_curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *) &get_data);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_HEADERFUNCTION, get_header_callback);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_WRITEHEADER, (void *) url);
-		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "freeswitch-http-cache/1.0");
+		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, cache->user_agent);
 		if (cache->connect_timeout > 0) {
 			switch_curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, cache->connect_timeout);
 		}
@@ -1610,6 +1612,7 @@ static switch_status_t do_config(url_cache_t *cache)
 	cache->enable_file_formats = 0;
 	cache->connect_timeout = 300;
 	cache->download_timeout = 300;
+	cache->user_agent = switch_core_sprintf(cache->pool, "freeswitch-http-cache/1.0");
 
 	/* get params */
 	settings = switch_xml_child(cfg, "settings");
@@ -1658,6 +1661,9 @@ static switch_status_t do_config(url_cache_t *cache)
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Setting download-timeout to %s\n", val);
 					cache->download_timeout = int_val;
 				}
+			} else if (!strcasecmp(var, "user-agent")) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Setting User Agent to %s\n", val);
+				cache->user_agent = switch_core_strdup(cache->pool, val);
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unsupported param: %s\n", var);
 			}
