@@ -160,7 +160,7 @@ struct http_get_data {
 };
 typedef struct http_get_data http_get_data_t;
 
-static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, switch_core_session_t *session);
+static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, switch_core_session_t *session, switch_curl_slist_t *headers);
 static size_t get_file_callback(void *ptr, size_t size, size_t nmemb, void *get);
 static size_t get_header_callback(void *ptr, size_t size, size_t nmemb, void *url);
 static void process_cache_control_header(cached_url_t *url, char *data);
@@ -244,7 +244,7 @@ struct url_cache {
 };
 static url_cache_t gcache;
 
-static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_core_session_t *session, const char *url, int download, int refresh, switch_memory_pool_t *pool);
+static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_core_session_t *session, const char *url, int download, int refresh, switch_memory_pool_t *pool, switch_curl_slist_t *headers);
 static switch_status_t url_cache_add(url_cache_t *cache, switch_core_session_t *session, cached_url_t *url);
 static void url_cache_remove(url_cache_t *cache, switch_core_session_t *session, cached_url_t *url);
 static void url_cache_remove_soft(url_cache_t *cache, switch_core_session_t *session, cached_url_t *url);
@@ -283,6 +283,22 @@ static void parse_domain(const char *url, char *domain_buf, int domain_buf_len)
 		/* bad URL */
 		domain_buf[0] = '\0';
 	}
+}
+
+static void parse_params_headers(switch_event_t *params, switch_curl_slist_t **headers)
+{
+	char *header_values = strdup(params->headers->value);
+	if (header_values) {
+		char *token = NULL;
+		char *saveptr = NULL;
+
+		token = strtok_r(header_values, ";", &saveptr);
+		while (token) {
+			*headers = switch_curl_slist_append(*headers, token);
+			token = strtok_r(NULL, ";", &saveptr);
+		}
+	}
+	switch_safe_free(header_values);
 }
 
 static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *userp)
@@ -717,7 +733,7 @@ static void url_cache_clear(url_cache_t *cache, switch_core_session_t *session)
  * @param pool The pool to use for allocating the filename
  * @return The filename or NULL if there is an error
  */
-static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_core_session_t *session, const char *url, int download, int refresh, switch_memory_pool_t *pool)
+static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_core_session_t *session, const char *url, int download, int refresh, switch_memory_pool_t *pool, switch_curl_slist_t *headers)
 {
 	switch_time_t download_timeout_ns = cache->download_timeout * 1000 * 1000;
 	char *filename = NULL;
@@ -764,7 +780,7 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 
 		/* download the file */
 		url_cache_unlock(cache, session);
-		if (http_get(cache, profile, u, session) == SWITCH_STATUS_SUCCESS) {
+		if (http_get(cache, profile, u, session, headers) == SWITCH_STATUS_SUCCESS) {
 			/* Got the file, let the waiters know it is available */
 			url_cache_lock(cache, session);
 			u->status = CACHED_URL_AVAILABLE;
@@ -1094,10 +1110,9 @@ static void cached_url_destroy(cached_url_t *url, switch_memory_pool_t *pool)
  * @param session the (optional) session
  * @return SWITCH_STATUS_SUCCESS if successful
  */
-static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, switch_core_session_t *session)
+static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, switch_core_session_t *session, switch_curl_slist_t *headers)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
-	switch_curl_slist_t *headers = NULL;  /* optional linked-list of HTTP headers */
 	switch_CURL *curl_handle = NULL;
 	http_get_data_t get_data = {0};
 	long httpRes = 0;
@@ -1274,6 +1289,7 @@ SWITCH_STANDARD_API(http_cache_get)
 	char *url;
 	int refresh = SWITCH_FALSE;
 	int download = DOWNLOAD;
+	switch_curl_slist_t *headers = NULL;
 
 	if (zstr(cmd)) {
 		stream->write_function(stream, "USAGE: %s\n", HTTP_GET_SYNTAX);
@@ -1297,10 +1313,13 @@ SWITCH_STANDARD_API(http_cache_get)
 		if (switch_true(switch_event_get_header(params, "prefetch"))) {
 			download = PREFETCH;
 		}
+		if (switch_event_get_header(params, "headers")) {
+			parse_params_headers(params, &headers);
+		}
 		refresh = switch_true(switch_event_get_header(params, "refresh"));
 	}
 
-	filename = url_cache_get(&gcache, profile, session, url, download, refresh, pool);
+	filename = url_cache_get(&gcache, profile, session, url, download, refresh, pool, headers);
 	if (filename) {
 		stream->write_function(stream, "%s", filename);
 
@@ -1351,7 +1370,7 @@ SWITCH_STANDARD_API(http_cache_tryget)
 		switch_event_create_brackets(url, '{', '}', ',', &params, &url, SWITCH_FALSE);
 	}
 
-	filename = url_cache_get(&gcache, NULL, session, url, 0, params ? switch_true(switch_event_get_header(params, "refresh")) : SWITCH_FALSE, pool);
+	filename = url_cache_get(&gcache, NULL, session, url, 0, params ? switch_true(switch_event_get_header(params, "refresh")) : SWITCH_FALSE, pool, NULL);
 	if (filename) {
 		if (!strcmp(DOWNLOAD_NEEDED, filename)) {
 			stream->write_function(stream, "-ERR %s\n", DOWNLOAD_NEEDED);
@@ -1486,7 +1505,7 @@ SWITCH_STANDARD_API(http_cache_remove)
 		switch_event_create_brackets(url, '{', '}', ',', &params, &url, SWITCH_FALSE);
 	}
 
-	url_cache_get(&gcache, NULL, session, url, 0, 1, pool);
+	url_cache_get(&gcache, NULL, session, url, 0, 1, pool, NULL);
 	stream->write_function(stream, "+OK\n");
 
 	if (lpool) {
@@ -1791,21 +1810,47 @@ static switch_status_t http_cache_file_open(switch_file_handle_t *handle, const 
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	struct http_context *context = switch_core_alloc(handle->memory_pool, sizeof(*context));
 	int file_flags = SWITCH_FILE_DATA_SHORT | (switch_test_flag(handle, SWITCH_FILE_FLAG_VIDEO) ? SWITCH_FILE_FLAG_VIDEO : 0);
+	char *url = NULL;
+	switch_event_t *params = NULL;
+	switch_curl_slist_t *headers = NULL;
+	int refresh = SWITCH_FALSE;
 
 	if (handle->params) {
 		context->profile = url_cache_http_profile_find(&gcache, switch_event_get_header(handle->params, "profile"));
+
+		if (switch_event_get_header(handle->params, "headers")) {
+			parse_params_headers(handle->params, &headers);
+		}
+
+		refresh = switch_true(switch_event_get_header(handle->params, "refresh"));
+	}
+
+	url = strdup(path);
+
+	if (*url == '{') {
+		switch_event_create_brackets(url, '{', '}', ',', &params, &url, SWITCH_FALSE);
+
+		if (params) {
+			context->profile = url_cache_http_profile_find(&gcache, switch_event_get_header(params, "profile"));
+
+			if (switch_event_get_header(params, "headers")) {
+				parse_params_headers(params, &headers);
+			}
+			
+			refresh = switch_true(switch_event_get_header(params, "refresh"));
+		}
 	}
 
 	if (switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
 		/* WRITE = HTTP PUT */
 		file_flags |= SWITCH_FILE_FLAG_WRITE;
-		context->write_url = switch_core_strdup(handle->memory_pool, path);
+		context->write_url = switch_core_strdup(handle->memory_pool, url);
 		/* allocate local file in cache */
 		context->local_path = cached_url_filename_create(&gcache, context->write_url, NULL);
 	} else {
 		/* READ = HTTP GET */
 		file_flags |= SWITCH_FILE_FLAG_READ;
-		context->local_path = url_cache_get(&gcache, context->profile, NULL, path, 1, handle->params ? switch_true(switch_event_get_header(handle->params, "refresh")) : 0, handle->memory_pool);
+		context->local_path = url_cache_get(&gcache, context->profile, NULL, url, 1, refresh, handle->memory_pool, headers);
 		if (!context->local_path) {
 			return SWITCH_STATUS_FALSE;
 		}
