@@ -1017,13 +1017,14 @@ static char *cached_url_filename_create(url_cache_t *cache, const char *url, cha
  */
 static void cached_url_set_extension_from_content_type(cached_url_t *url, switch_core_session_t *session)
 {
-	if (!url->extension && url->content_type) {
+	if (url->content_type) {
 		const char *new_extension = switch_core_mime_type2ext(url->content_type);
 		if (new_extension) {
 			char *new_filename = switch_mprintf("%s.%s", url->filename, new_extension);
 			if (rename(url->filename, new_filename) != -1) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "renamed cached URL to %s\n", new_filename);
 				free(url->filename);
+				free(url->extension);
 				url->filename = new_filename;
 				url->extension = strdup(new_extension);
 			} else {
@@ -1182,7 +1183,7 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "URL %s downloaded in %d ms\n", url->url, duration_ms);
 		}
-		if (!url->extension) {
+		if (!url->extension || zstr(switch_core_mime_ext2type(url->extension))) {
 			cached_url_set_extension_from_content_type(url, session);
 		}
 	} else {
